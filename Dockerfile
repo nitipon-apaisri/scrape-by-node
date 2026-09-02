@@ -1,10 +1,11 @@
-FROM mcr.microsoft.com/playwright:v1.61.1-jammy
+FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 WORKDIR /app
 
 RUN corepack enable
 
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
