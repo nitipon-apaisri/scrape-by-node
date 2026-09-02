@@ -10,10 +10,13 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY . .
-RUN pnpm build
+RUN pnpm build && chmod +x start.sh
 
 ENV NODE_ENV=production
 
+# Playwright base image may define an entrypoint that prevents our CMD from running.
+ENTRYPOINT []
+
 EXPOSE 3340
 
-CMD ["xvfb-run", "--auto-servernum", "node", "dist/main.js"]
+CMD ["./start.sh"]
