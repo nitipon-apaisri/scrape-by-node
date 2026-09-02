@@ -37,19 +37,24 @@ First live scrape launches Chromium and may take **5–30 seconds**.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `PORT` | `3340` | HTTP port |
+| `PORT` | `3340` | HTTP port (Railway sets this automatically) |
 | `DBD_BASE_URL` | `https://datawarehouse.dbd.go.th` | Target site |
-| `DBD_HEADLESS` | `true` | Set `false` to debug WAF blocks |
+| `DBD_HEADLESS` | `false` | Set `false` to bypass DBD WAF (required for reliable results) |
 | `DBD_NAV_TIMEOUT_MS` | `30000` | Navigation / selector timeout |
-| `DBD_BROWSER_CHANNEL` | — | `chrome` or `msedge` to use installed browser |
+| `DBD_BROWSER_CHANNEL` | — | `chrome` or `msedge` locally; leave empty in Docker/Railway |
 | `DBD_DEBUG` | `false` | Save screenshot + HTML on failures |
 | `DBD_BLOCK_ASSETS` | `true` | Skip images/fonts for faster loads |
 
-If headless scraping returns empty results, try:
+For local development on macOS/Windows, headed mode opens a visible browser window:
 
 ```env
 DBD_HEADLESS=false
 DBD_BROWSER_CHANNEL=chrome
+```
+
+Enable debug snapshots temporarily if scraping fails:
+
+```env
 DBD_DEBUG=true
 ```
 
@@ -59,6 +64,58 @@ DBD_DEBUG=true
 pnpm start:dev    # watch mode
 pnpm build        # compile to dist/
 pnpm start:prod   # run compiled app
+```
+
+## Deploy on Railway
+
+This app runs as a **Docker container** with Playwright + Chromium. Railway must use the included `Dockerfile` (configured via `railway.toml`) — do not use Nixpacks auto-detect.
+
+### Pre-deploy checklist
+
+1. Push this repo to GitHub
+2. [Railway](https://railway.app) → **New Project** → **Deploy from GitHub repo**
+3. Confirm the builder is **Dockerfile** (from `railway.toml`)
+
+### Service settings
+
+| Setting | Value |
+|---------|-------|
+| **Memory** | 2048 MB (minimum 1024 MB) |
+| **Health check path** | `/health` |
+| **Public networking** | Generate a domain |
+
+### Environment variables (Railway dashboard)
+
+| Variable | Value |
+|----------|-------|
+| `DBD_HEADLESS` | `false` |
+| `DBD_BROWSER_CHANNEL` | *(leave empty)* |
+| `DBD_DEBUG` | `false` |
+| `DBD_BLOCK_ASSETS` | `true` |
+| `DBD_NAV_TIMEOUT_MS` | `30000` |
+| `DBD_BASE_URL` | `https://datawarehouse.dbd.go.th` |
+| `PORT` | *(Railway injects automatically — do not hardcode)* |
+
+The Docker image runs the app under `xvfb-run` so headed browser mode works on Linux without a physical display.
+
+### Post-deploy smoke test
+
+```bash
+curl https://<your-app>.up.railway.app/health
+
+curl "https://<your-app>.up.railway.app/search?keyword=บริษัท&page=1"
+```
+
+### Known risk
+
+DBD may block Railway datacenter IPs even with headed mode. If `/search` returns empty results or WAF errors, check Railway logs and temporarily set `DBD_DEBUG=true` to capture snapshots.
+
+### Local Docker test (optional)
+
+```bash
+docker build -t scrape-by-node .
+docker run --rm -p 3340:3340 -e DBD_HEADLESS=false scrape-by-node
+curl http://localhost:3340/health
 ```
 
 ## Source
