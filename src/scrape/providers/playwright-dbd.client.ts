@@ -6,18 +6,42 @@ import {
   DbdCompanyProfile,
   DbdCompanySearchResult,
 } from '../interfaces/dbd-company.interface';
+import {
+  DbdBalanceSheetResult,
+  DbdBalanceSheetYear,
+  DbdFinancialBasics,
+  DbdFinancialCharts,
+  DbdFinancialResult,
+} from '../interfaces/dbd-financial.interface';
+import { browserFetchDbdApi } from '../utils/dbd-browser-api.util';
+import { splitJuristicId, toBuddhistYear } from '../utils/dbd-juristic.util';
 import { DbdBrowserService } from './dbd-browser.service';
 
 const PAGE_SIZE = 10;
 const REG_NO_RE = /^\d{13}$/;
 
 /** Strip Thai number formatting ("1,000,000.00 บาท", "-") to a JS number. */
-function toNumber(raw: string | null | undefined): number {
-  if (!raw) return 0;
+function toNumber(raw: string | number | null | undefined): number {
+  if (raw == null) return 0;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0;
   const cleaned = raw.replace(/[^0-9.-]/g, '');
   if (cleaned === '' || cleaned === '-') return 0;
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
+}
+
+function apiNum(obj: Record<string, unknown>, ...keys: string[]): number {
+  for (const key of keys) {
+    if (obj[key] != null && obj[key] !== '') return toNumber(obj[key] as string | number);
+  }
+  return 0;
+}
+
+function apiNumOrNull(obj: Record<string, unknown>, ...keys: string[]): number | null {
+  for (const key of keys) {
+    if (obj[key] != null && obj[key] !== '') return toNumber(obj[key] as string | number);
+  }
+  return null;
 }
 
 /**
@@ -106,6 +130,284 @@ export class PlaywrightDbdClient {
       }
       return this.parseProfile(pg);
     });
+  }
+
+  async getFinancial(registrationNo: string, year?: number): Promise<DbdFinancialResult | null> {
+    const id = (registrationNo || '').trim();
+    if (!REG_NO_RE.test(id)) return null;
+
+    const [typeCode, fullId] = splitJuristicId(id);
+    const requestedYear = year != null ? toBuddhistYear(year) : undefined;
+
+    return this.browser.withPage(async pg => {
+      await this.gotoSearch(pg, id);
+      if (!this.isProfileUrl(pg.url())) {
+        return null;
+      }
+
+      const chartsPath = `/api/v1/fin/basics/charts/${typeCode}/${fullId}`;
+      const chartsRes = await this.fetchDbdApi(pg, chartsPath);
+      const charts = chartsRes.data ? this.mapFinancialCharts(chartsRes.data) : null;
+
+      const profile = await this.parseProfile(pg);
+
+      let fiscalYears: number[];
+      if (requestedYear != null) {
+        fiscalYears = [requestedYear];
+      } else {
+        fiscalYears = profile?.financialYears?.length
+          ? [...profile.financialYears]
+          : charts?.years?.length
+            ? [...charts.years]
+            : [];
+      }
+
+      fiscalYears = [...new Set(fiscalYears)].sort((a, b) => a - b);
+
+      const years: DbdFinancialBasics[] = [];
+      for (const yr of fiscalYears) {
+        const path = `/api/v1/fin/basics/${typeCode}/${fullId}?fiscalYear=${yr}`;
+        const res = await this.fetchDbdApi(pg, path);
+        if (!res.data) continue;
+        const basics = this.mapFinancialBasics(res.data, yr, profile?.registeredCapital);
+        if (basics) years.push(basics);
+      }
+
+      const chartsFromYears = this.buildChartsFromYears(years);
+
+      return {
+        registrationNo: id,
+        years,
+        charts: chartsFromYears ?? charts,
+      };
+    });
+  }
+
+  async getBalanceSheet(registrationNo: string, year?: number): Promise<DbdBalanceSheetResult | null> {
+    const id = (registrationNo || '').trim();
+    if (!REG_NO_RE.test(id)) return null;
+
+    const [typeCode, fullId] = splitJuristicId(id);
+    const requestedYear = year != null ? toBuddhistYear(year) : undefined;
+
+    return this.browser.withPage(async pg => {
+      await this.gotoSearch(pg, id);
+      if (!this.isProfileUrl(pg.url())) {
+        return null;
+      }
+
+      const profile = await this.parseProfile(pg);
+      const anchorYear =
+        requestedYear ??
+        (profile?.financialYears?.length ? Math.max(...profile.financialYears) : undefined);
+
+      if (!anchorYear) {
+        return { registrationNo: id, anchorYear: 0, years: [] };
+      }
+
+      const path = `/api/v1/fin/balancesheet/year/${typeCode}/${fullId}?fiscalYear=${anchorYear}`;
+      const res = await this.fetchDbdApi(pg, path);
+      if (!res.data) {
+        return { registrationNo: id, anchorYear, years: [] };
+      }
+
+      let years = this.mapBalanceSheetRows(res.data);
+      if (requestedYear != null) {
+        years = years.filter(y => y.fiscalYear === requestedYear);
+      }
+
+      return { registrationNo: id, anchorYear, years };
+    });
+  }
+
+  private mapBalanceSheetRows(raw: unknown): DbdBalanceSheetYear[] {
+    if (!raw || typeof raw !== 'object') return [];
+    const obj = raw as Record<string, unknown>;
+    const rows = Array.isArray(obj.finStatementDailyDtos)
+      ? (obj.finStatementDailyDtos as Record<string, unknown>[])
+      : [];
+
+    return rows
+      .map(row => this.mapBalanceSheetYear(row))
+      .filter((y): y is DbdBalanceSheetYear => y != null)
+      .sort((a, b) => a.fiscalYear - b.fiscalYear);
+  }
+
+  private mapBalanceSheetYear(row: Record<string, unknown>): DbdBalanceSheetYear | null {
+    const fiscalYear = apiNum(row, 'fiscalYear', 'FiscalYear');
+    if (!fiscalYear) return null;
+
+    return {
+      fiscalYear,
+      accountReceivable: apiNumOrNull(row, 'traderreceivables', 'traderreceivablesA'),
+      accountReceivableChangePct: apiNumOrNull(row, 'traderreceivablesPc'),
+      inventory: apiNumOrNull(row, 'inventories', 'inventoriesA'),
+      inventoryChangePct: apiNumOrNull(row, 'inventoriesPc'),
+      totalCurrentAssets: apiNum(row, 'currentassets', 'currentassetsA'),
+      totalCurrentAssetsChangePct: apiNumOrNull(row, 'currentassetsPc'),
+      propertyPlantAndEquipment: apiNumOrNull(row, 'propertyplantandequipment', 'propertyplantandequipmentA'),
+      propertyPlantAndEquipmentChangePct: apiNumOrNull(row, 'propertyplantandequipmentPc'),
+      totalNonCurrentAssets: apiNum(row, 'noncurrentassets', 'noncurrentassetsA'),
+      totalNonCurrentAssetsChangePct: apiNumOrNull(row, 'noncurrentassetsPc'),
+      totalAssets: apiNum(row, 'assets', 'assetsA'),
+      totalAssetsChangePct: apiNumOrNull(row, 'assetsPc'),
+      currentLiabilities: apiNum(row, 'currentliabilities', 'currentliabilitiesA'),
+      currentLiabilitiesChangePct: apiNumOrNull(row, 'currentliabilitiesPc'),
+      nonCurrentLiabilities: apiNumOrNull(row, 'noncurrentliabilities', 'noncurrentliabilitiesA'),
+      nonCurrentLiabilitiesChangePct: apiNumOrNull(row, 'noncurrentliabilitiesPc'),
+      totalLiabilities: apiNum(row, 'liabilities', 'liabilitiesA'),
+      totalLiabilitiesChangePct: apiNumOrNull(row, 'liabilitiesPc'),
+      shareholderEquity: apiNum(row, 'equity', 'equityA'),
+      shareholderEquityChangePct: apiNumOrNull(row, 'equityPc'),
+      totalLiabilitiesAndEquity: apiNum(row, 'liabilitiesandequity', 'liabilitiesandequityA'),
+      totalLiabilitiesAndEquityChangePct: apiNumOrNull(row, 'liabilitiesandequityPc'),
+    };
+  }
+
+  private async fetchDbdApi(
+    pg: Page,
+    path: string,
+  ): Promise<{ ok: boolean; status: number; data: unknown }> {
+    const result = await pg.evaluate(browserFetchDbdApi, path);
+
+    if (!result.ok) {
+      this.logger.warn(`DBD API ${path} failed: status=${result.status} error=${result.error ?? 'unknown'}`);
+      if (result.status === 401 || result.status === 403) {
+        await this.browser.snapshot(pg, 'api-auth-failed');
+        throw new ServiceUnavailableException(
+          `DBD API auth failed (${result.status}) for ${path}. Try DBD_HEADLESS=false / DBD_DEBUG=true.`,
+        );
+      }
+      return { ok: false, status: result.status, data: null };
+    }
+
+    return { ok: true, status: result.status, data: result.data };
+  }
+
+  private mapFinancialBasics(
+    raw: unknown,
+    requestedYear?: number,
+    registeredCapital = 0,
+  ): DbdFinancialBasics | null {
+    const row = this.unwrapFinancialRow(raw);
+    if (!row) return null;
+
+    const fiscalYear =
+      apiNum(row, 'fiscalYear', 'FiscalYear', 'statementYear', 'StatementYear') ||
+      requestedYear ||
+      0;
+    if (!fiscalYear) return null;
+
+    return {
+      fiscalYear,
+      registeredCapital: apiNum(row, 'registeredCapital', 'RegisterCapital', 'registerCapital') || registeredCapital,
+      paidUpCapital: apiNum(row, 'paidUpCapital', 'PaidUpCapital', 'paidCapital'),
+      totalRevenue: apiNum(row, 'revenueA', 'totalRevenue', 'TotalRevenue'),
+      saleRevenue: apiNum(row, 'revfromsaleorrevfromserviceA', 'saleRevenue', 'SaleRevenue'),
+      costOfGoodsSold: apiNum(row, 'costsofsaleofgoodorserviceA', 'costOfGoodsSold', 'CostOfGoodsSold'),
+      adminExpenses: apiNum(row, 'administrativeexpenseA', 'adminExpenses', 'AdminExpenses'),
+      netProfit: apiNum(row, 'profitlossA', 'netProfit', 'NetProfit'),
+      totalAssets: apiNum(row, 'assetsA', 'totalAssets', 'TotalAsset', 'totalAsset'),
+      totalCurrentAssets: apiNum(row, 'currentassetsA', 'totalCurrentAssets', 'TotalCurrentAsset', 'totalCurrentAsset'),
+      totalLiabilities: apiNum(row, 'liabilitiesA', 'totalLiabilities', 'TotalLiabilities'),
+      currentLiabilities: apiNum(row, 'currentliabilitiesA', 'currentLiabilities', 'CurrentLiabilities'),
+      shareholderEquity: apiNum(row, 'equityA', 'shareholderEquity', 'ShareholderEquity'),
+      accountReceivable: apiNum(row, 'traderreceivablesA', 'accountReceivable', 'AccountReceivable'),
+      inventory: apiNum(row, 'inventoriesA', 'inventory', 'Inventory'),
+      interestExpenses: apiNum(row, 'interestexpenseA', 'interestExpenses', 'InterestExpenses'),
+      incomeTax: apiNum(row, 'taxexpenseincomeA', 'incomeTax', 'IncomeTax'),
+      earningPerShare: apiNum(row, 'earningPerShare', 'EarningPerShare'),
+    };
+  }
+
+  private buildChartsFromYears(years: DbdFinancialBasics[]): DbdFinancialCharts | null {
+    if (!years.length) return null;
+    const sorted = [...years].sort((a, b) => a.fiscalYear - b.fiscalYear);
+    return {
+      years: sorted.map(y => y.fiscalYear),
+      totalRevenue: sorted.map(y => y.totalRevenue),
+      netProfit: sorted.map(y => y.netProfit),
+      totalAssets: sorted.map(y => y.totalAssets),
+      shareholderEquity: sorted.map(y => y.shareholderEquity),
+    };
+  }
+
+  private unwrapFinancialRow(raw: unknown): Record<string, unknown> | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const obj = raw as Record<string, unknown>;
+
+    if (Array.isArray(obj.data) && obj.data.length) {
+      return obj.data[0] as Record<string, unknown>;
+    }
+    if (Array.isArray(raw) && raw.length) {
+      return raw[0] as Record<string, unknown>;
+    }
+    if (obj.result && typeof obj.result === 'object') {
+      return obj.result as Record<string, unknown>;
+    }
+    if (obj.basics && typeof obj.basics === 'object') {
+      return obj.basics as Record<string, unknown>;
+    }
+
+    const hasFigures = ['revenueA', 'profitlossA', 'assetsA', 'totalRevenue', 'TotalRevenue', 'netProfit', 'NetProfit'].some(
+      k => k in obj,
+    );
+    return hasFigures ? obj : null;
+  }
+
+  private mapFinancialCharts(raw: unknown): DbdFinancialCharts | null {
+    const rows = this.unwrapFinancialChartRows(raw);
+    if (!rows.length) return null;
+
+    const years: number[] = [];
+    const totalRevenue: number[] = [];
+    const netProfit: number[] = [];
+    const totalAssets: number[] = [];
+    const shareholderEquity: number[] = [];
+
+    for (const row of rows) {
+      const year =
+        apiNum(row, 'fiscalYear', 'FiscalYear', 'statementYear', 'StatementYear', 'year', 'Year') ||
+        toNumber(String(row.label ?? row.name ?? ''));
+      if (!year) continue;
+
+      years.push(year);
+      totalRevenue.push(apiNum(row, 'totalRevenue', 'TotalRevenue'));
+      netProfit.push(apiNum(row, 'netProfit', 'NetProfit'));
+      totalAssets.push(apiNum(row, 'totalAssets', 'TotalAsset', 'totalAsset'));
+      shareholderEquity.push(apiNum(row, 'shareholderEquity', 'ShareholderEquity'));
+    }
+
+    if (!years.length) return null;
+    return { years, totalRevenue, netProfit, totalAssets, shareholderEquity };
+  }
+
+  private unwrapFinancialChartRows(raw: unknown): Record<string, unknown>[] {
+    if (!raw || typeof raw !== 'object') return [];
+    const obj = raw as Record<string, unknown>;
+
+    if (Array.isArray(raw)) return raw as Record<string, unknown>[];
+    if (Array.isArray(obj.data)) return obj.data as Record<string, unknown>[];
+    if (Array.isArray(obj.items)) return obj.items as Record<string, unknown>[];
+    if (Array.isArray(obj.series)) return obj.series as Record<string, unknown>[];
+
+    const labels = obj.labels ?? obj.years ?? obj.fiscalYears;
+    if (Array.isArray(labels)) {
+      const rev = (obj.totalRevenue ?? obj.TotalRevenue ?? obj.revenues) as unknown[];
+      const profit = (obj.netProfit ?? obj.NetProfit ?? obj.profits) as unknown[];
+      const assets = (obj.totalAssets ?? obj.TotalAsset ?? obj.assets) as unknown[];
+      const equity = (obj.shareholderEquity ?? obj.ShareholderEquity ?? obj.equity) as unknown[];
+
+      return (labels as unknown[]).map((label, i) => ({
+        fiscalYear: toNumber(String(label)),
+        totalRevenue: rev?.[i],
+        netProfit: profit?.[i],
+        totalAssets: assets?.[i],
+        shareholderEquity: equity?.[i],
+      }));
+    }
+
+    return [];
   }
 
   private async gotoSearch(pg: Page, keyword: string): Promise<void> {

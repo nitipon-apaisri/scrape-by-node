@@ -20,6 +20,8 @@ Default port: **3340**
 | GET | `/health` | Liveness check |
 | GET | `/search?keyword=&page=1` | Name search (paginated list) |
 | GET | `/profile/:registrationNo` | Full profile by 13-digit reg no |
+| GET | `/profile/:registrationNo/financial?year=` | Financial key figures per year (`years[]`) + charts |
+| GET | `/profile/:registrationNo/financial/balance-sheet?year=` | Balance sheet table (งบแสดงฐานะการเงิน) matching DBD UI |
 
 ## Examples
 
@@ -29,6 +31,30 @@ curl http://localhost:3340/health
 curl "http://localhost:3340/search?keyword=บริษัท&page=1"
 
 curl "http://localhost:3340/profile/0107544000108"
+
+curl "http://localhost:3340/profile/0105545087817/financial"
+
+curl "http://localhost:3340/profile/0105545087817/financial?year=2568"
+
+curl "http://localhost:3340/profile/0105545087817/financial/balance-sheet"
+```
+
+The financial endpoints accept an optional `year` query param — **พ.ศ.** (e.g. `2569`) or **ค.ศ.** (e.g. `2026`, auto-converted).
+
+- `/financial` — key figures from `/fin/basics` (all filed years, or one year with `?year=`).
+- `/financial/balance-sheet` — balance sheet from `/fin/balancesheet/year` (multi-year comparison table as shown on DBD; omit `year` for latest anchor year, or pass `?year=` for a single fiscal year).
+
+Example response:
+
+```json
+{
+  "registrationNo": "0105545087817",
+  "years": [
+    { "fiscalYear": 2561, "totalRevenue": 8000000, "netProfit": 100000, "totalAssets": 3000000, "...": "..." },
+    { "fiscalYear": 2562, "totalRevenue": 9000000, "netProfit": 120000, "totalAssets": 3400000, "...": "..." }
+  ],
+  "charts": { "years": [2561, 2562], "totalRevenue": [...], "netProfit": [...], "totalAssets": [...], "shareholderEquity": [...] }
+}
 ```
 
 First live scrape launches Chromium and may take **5–30 seconds**.
