@@ -12,6 +12,8 @@ import {
   DbdFinancialBasics,
   DbdFinancialCharts,
   DbdFinancialResult,
+  DbdIncomeStatementResult,
+  DbdIncomeStatementYear,
 } from '../interfaces/dbd-financial.interface';
 import { browserFetchDbdApi } from '../utils/dbd-browser-api.util';
 import { splitJuristicId, toBuddhistYear } from '../utils/dbd-juristic.util';
@@ -218,6 +220,95 @@ export class PlaywrightDbdClient {
 
       return { registrationNo: id, anchorYear, years };
     });
+  }
+
+  async getIncomeStatement(registrationNo: string, year?: number): Promise<DbdIncomeStatementResult | null> {
+    const id = (registrationNo || '').trim();
+    if (!REG_NO_RE.test(id)) return null;
+
+    const [typeCode, fullId] = splitJuristicId(id);
+    const requestedYear = year != null ? toBuddhistYear(year) : undefined;
+
+    return this.browser.withPage(async pg => {
+      await this.gotoSearch(pg, id);
+      if (!this.isProfileUrl(pg.url())) {
+        return null;
+      }
+
+      const profile = await this.parseProfile(pg);
+      const anchorYear =
+        requestedYear ??
+        (profile?.financialYears?.length ? Math.max(...profile.financialYears) : undefined);
+
+      if (!anchorYear) {
+        return { registrationNo: id, anchorYear: 0, years: [] };
+      }
+
+      const path = `/api/v1/fin/incomestatement/year/${typeCode}/${fullId}?fiscalYear=${anchorYear}`;
+      const res = await this.fetchDbdApi(pg, path);
+      if (!res.data) {
+        return { registrationNo: id, anchorYear, years: [] };
+      }
+
+      let years = this.mapIncomeStatementRows(res.data);
+      if (requestedYear != null) {
+        years = years.filter(y => y.fiscalYear === requestedYear);
+      }
+
+      return { registrationNo: id, anchorYear, years };
+    });
+  }
+
+  private mapIncomeStatementRows(raw: unknown): DbdIncomeStatementYear[] {
+    if (!raw || typeof raw !== 'object') return [];
+    const obj = raw as Record<string, unknown>;
+    const rows = Array.isArray(obj.finStatementDailyDtos)
+      ? (obj.finStatementDailyDtos as Record<string, unknown>[])
+      : [];
+
+    return rows
+      .map(row => this.mapIncomeStatementYear(row))
+      .filter((y): y is DbdIncomeStatementYear => y != null)
+      .sort((a, b) => a.fiscalYear - b.fiscalYear);
+  }
+
+  private mapIncomeStatementYear(row: Record<string, unknown>): DbdIncomeStatementYear | null {
+    const fiscalYear = apiNum(row, 'fiscalYear', 'FiscalYear');
+    if (!fiscalYear) return null;
+
+    return {
+      fiscalYear,
+      saleRevenue: apiNumOrNull(row, 'revfromsaleorrevfromservice', 'revfromsaleorrevfromserviceA'),
+      saleRevenueChangePct: apiNumOrNull(row, 'revfromsaleorrevfromservicePc'),
+      totalRevenue: apiNumOrNull(row, 'revenue', 'revenueA'),
+      totalRevenueChangePct: apiNumOrNull(row, 'revenuePc'),
+      costOfGoodsSold: apiNumOrNull(row, 'costsofsaleofgoodorservice', 'costsofsaleofgoodorserviceA'),
+      costOfGoodsSoldChangePct: apiNumOrNull(row, 'costsofsaleofgoodorservicePc'),
+      grossProfit: apiNumOrNull(row, 'grossprofit', 'grossprofitA'),
+      grossProfitChangePct: apiNumOrNull(row, 'grossprofitPc'),
+      adminExpenses: apiNumOrNull(
+        row,
+        'sellingandserviceexpense',
+        'sellingandserviceexpenseA',
+        'administrativeexpense',
+        'administrativeexpenseA',
+      ),
+      adminExpensesChangePct: apiNumOrNull(
+        row,
+        'sellingandserviceexpensePc',
+        'administrativeexpensePc',
+      ),
+      totalExpenses: apiNumOrNull(row, 'expenses', 'expensesA'),
+      totalExpensesChangePct: apiNumOrNull(row, 'expensesPc'),
+      interestExpenses: apiNumOrNull(row, 'interestexpense', 'interestexpenseA'),
+      interestExpensesChangePct: apiNumOrNull(row, 'interestexpensePc'),
+      profitBeforeTax: apiNumOrNull(row, 'plbeforeincometaxexpense', 'plbeforeincometaxexpenseA'),
+      profitBeforeTaxChangePct: apiNumOrNull(row, 'plbeforeincometaxexpensePc'),
+      incomeTax: apiNumOrNull(row, 'taxexpenseincome', 'taxexpenseincomeA'),
+      incomeTaxChangePct: apiNumOrNull(row, 'taxexpenseincomePc'),
+      netProfit: apiNumOrNull(row, 'profitloss', 'profitlossA'),
+      netProfitChangePct: apiNumOrNull(row, 'profitlossPc'),
+    };
   }
 
   private mapBalanceSheetRows(raw: unknown): DbdBalanceSheetYear[] {

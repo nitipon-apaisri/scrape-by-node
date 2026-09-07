@@ -22,6 +22,7 @@ Default port: **3340**
 | GET | `/profile/:registrationNo` | Full profile by 13-digit reg no |
 | GET | `/profile/:registrationNo/financial?year=` | Financial key figures per year (`years[]`) + charts |
 | GET | `/profile/:registrationNo/financial/balance-sheet?year=` | Balance sheet table (งบแสดงฐานะการเงิน) matching DBD UI |
+| GET | `/profile/:registrationNo/financial/income-statement?year=` | Income statement table (งบกำไรขาดทุน) matching DBD UI |
 
 ## Examples
 
@@ -37,12 +38,17 @@ curl "http://localhost:3340/profile/0105545087817/financial"
 curl "http://localhost:3340/profile/0105545087817/financial?year=2568"
 
 curl "http://localhost:3340/profile/0105545087817/financial/balance-sheet"
+
+curl "http://localhost:3340/profile/0205568063182/financial/income-statement"
+
+curl "http://localhost:3340/profile/0205568063182/financial/income-statement?year=2568"
 ```
 
 The financial endpoints accept an optional `year` query param — **พ.ศ.** (e.g. `2569`) or **ค.ศ.** (e.g. `2026`, auto-converted).
 
 - `/financial` — key figures from `/fin/basics` (all filed years, or one year with `?year=`).
 - `/financial/balance-sheet` — balance sheet from `/fin/balancesheet/year` (multi-year comparison table as shown on DBD; omit `year` for latest anchor year, or pass `?year=` for a single fiscal year).
+- `/financial/income-statement` — income statement from `/fin/incomestatement/year` (งบกำไรขาดทุน; same multi-year comparison pattern as balance sheet).
 
 Example response:
 

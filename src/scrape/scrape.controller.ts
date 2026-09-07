@@ -56,6 +56,22 @@ export class ScrapeController {
     return balanceSheet;
   }
 
+  @Get('profile/:registrationNo/financial/income-statement')
+  async incomeStatement(
+    @Param('registrationNo') registrationNo: string,
+    @Query() query: FinancialQuery,
+  ) {
+    const id = (registrationNo || '').trim();
+    if (!REG_NO_RE.test(id)) {
+      throw new BadRequestException('registrationNo must be exactly 13 digits');
+    }
+    const incomeStatement = await this.client.getIncomeStatement(id, query.year);
+    if (!incomeStatement) {
+      throw new NotFoundException(`No profile found for registration number ${id}`);
+    }
+    return incomeStatement;
+  }
+
   @Get('profile/:registrationNo/financial')
   async financial(
     @Param('registrationNo') registrationNo: string,
