@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -19,12 +20,22 @@ export class DbdBrowserService implements OnModuleDestroy {
   /** Promise chain that serializes access to the single shared page. */
   private queue: Promise<unknown> = Promise.resolve();
 
-  private readonly baseUrl = process.env.DBD_BASE_URL || 'https://datawarehouse.dbd.go.th';
-  private readonly headless = process.env.DBD_HEADLESS !== 'false';
-  private readonly navTimeout = Number(process.env.DBD_NAV_TIMEOUT_MS || 30000);
+  private readonly baseUrl: string;
+  private readonly headless: boolean;
+  private readonly navTimeout: number;
+  private readonly browserChannel: string;
+  private readonly blockAssets: boolean;
   private readonly userAgent =
     process.env.DBD_USER_AGENT ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+  constructor(private readonly config: ConfigService) {
+    this.baseUrl = this.config.get<string>('dbd.baseUrl', 'https://datawarehouse.dbd.go.th');
+    this.headless = this.config.get<boolean>('dbd.headless', false);
+    this.navTimeout = this.config.get<number>('dbd.navTimeoutMs', 30000);
+    this.browserChannel = this.config.get<string | undefined>('dbd.browserChannel');
+    this.blockAssets = this.config.get<boolean>('dbd.blockAssets', true);
+  }
 
   get base(): string {
     return this.baseUrl;
@@ -35,7 +46,7 @@ export class DbdBrowserService implements OnModuleDestroy {
   }
 
   get debug(): boolean {
-    return process.env.DBD_DEBUG === 'true' || process.env.DBD_DEBUG === '1';
+    return this.config.get<boolean>('dbd.debug', false);
   }
 
   /**
@@ -72,13 +83,13 @@ export class DbdBrowserService implements OnModuleDestroy {
       );
     }
 
-    const channel = process.env.DBD_BROWSER_CHANNEL || undefined;
+    const channel = this.browserChannel?.trim() || undefined;
     this.logger.log(
-      `Launching browser (channel=${channel || 'chromium'}, headless=${this.headless}) for DBD lookups`,
+      `Launching browser (channel=${channel || 'bundled-chromium'}, headless=${this.headless}) for DBD lookups`,
     );
     try {
       this.browser = await chromium.launch({
-        channel,
+        ...(channel ? { channel } : {}),
         headless: this.headless,
         args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
       });
@@ -104,7 +115,7 @@ export class DbdBrowserService implements OnModuleDestroy {
       );
     }
 
-    if (process.env.DBD_BLOCK_ASSETS !== 'false') {
+    if (this.blockAssets) {
       await this.context.route('**/*', route => {
         const type = route.request().resourceType();
         if (type === 'image' || type === 'media' || type === 'font') return route.abort();

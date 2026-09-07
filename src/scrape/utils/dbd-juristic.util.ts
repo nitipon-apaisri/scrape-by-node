@@ -5,6 +5,12 @@ export function splitJuristicId(id: string): [string, string] {
   return [clean[3]!, clean];
 }
 
+/** DBD company profile path segment, e.g. `50105545071341` for `0105545071341`. */
+export function buildProfileSlug(id: string): string {
+  const [typeCode, fullId] = splitJuristicId(id);
+  return `${typeCode}${fullId}`;
+}
+
 /** Convert CE year to Buddhist era (พ.ศ.); pass-through if already >= 2400. */
 export function toBuddhistYear(year: number): number {
   return year < 2400 ? year + 543 : year;

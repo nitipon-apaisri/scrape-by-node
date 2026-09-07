@@ -16,7 +16,7 @@ import {
   DbdIncomeStatementYear,
 } from '../interfaces/dbd-financial.interface';
 import { browserFetchDbdApi } from '../utils/dbd-browser-api.util';
-import { splitJuristicId, toBuddhistYear } from '../utils/dbd-juristic.util';
+import { buildProfileSlug, splitJuristicId, toBuddhistYear } from '../utils/dbd-juristic.util';
 import { DbdBrowserService } from './dbd-browser.service';
 
 const PAGE_SIZE = 10;
@@ -126,8 +126,7 @@ export class PlaywrightDbdClient {
     if (!REG_NO_RE.test(id)) return null;
 
     return this.browser.withPage(async pg => {
-      await this.gotoSearch(pg, id);
-      if (!this.isProfileUrl(pg.url())) {
+      if (!(await this.gotoProfile(pg, id))) {
         return null;
       }
       return this.parseProfile(pg);
@@ -142,8 +141,7 @@ export class PlaywrightDbdClient {
     const requestedYear = year != null ? toBuddhistYear(year) : undefined;
 
     return this.browser.withPage(async pg => {
-      await this.gotoSearch(pg, id);
-      if (!this.isProfileUrl(pg.url())) {
+      if (!(await this.gotoProfile(pg, id))) {
         return null;
       }
 
@@ -193,8 +191,7 @@ export class PlaywrightDbdClient {
     const requestedYear = year != null ? toBuddhistYear(year) : undefined;
 
     return this.browser.withPage(async pg => {
-      await this.gotoSearch(pg, id);
-      if (!this.isProfileUrl(pg.url())) {
+      if (!(await this.gotoProfile(pg, id))) {
         return null;
       }
 
@@ -230,8 +227,7 @@ export class PlaywrightDbdClient {
     const requestedYear = year != null ? toBuddhistYear(year) : undefined;
 
     return this.browser.withPage(async pg => {
-      await this.gotoSearch(pg, id);
-      if (!this.isProfileUrl(pg.url())) {
+      if (!(await this.gotoProfile(pg, id))) {
         return null;
       }
 
@@ -499,6 +495,42 @@ export class PlaywrightDbdClient {
     }
 
     return [];
+  }
+
+  private buildProfileUrl(registrationNo: string): string {
+    return `${this.browser.base}/company/profile/${buildProfileSlug(registrationNo)}`;
+  }
+
+  /** Open a company profile; falls back to direct URL when search stays on the results page. */
+  private async gotoProfile(pg: Page, registrationNo: string): Promise<boolean> {
+    await this.gotoSearch(pg, registrationNo);
+    if (this.isProfileUrl(pg.url())) {
+      return true;
+    }
+
+    const profileUrl = this.buildProfileUrl(registrationNo);
+    this.logger.log(`Search did not redirect to profile; navigating directly to ${profileUrl}`);
+
+    await pg.goto(profileUrl, { waitUntil: 'domcontentloaded' });
+    await this.browser.dismissPopup(pg);
+
+    const blocked = await this.browser.detectBlock(pg);
+    if (blocked) {
+      await this.browser.snapshot(pg, 'blocked-profile');
+      throw new ServiceUnavailableException(
+        `DBD ${blocked}. The anti-bot WAF likely blocked the headless browser — try DBD_HEADLESS=false, ` +
+          'and set DBD_DEBUG=true to capture a screenshot.',
+      );
+    }
+
+    await this.waitForProfileReady(pg);
+    if (this.isProfileUrl(pg.url())) {
+      this.logger.log(`gotoProfile("${registrationNo}") -> url=${pg.url()}`);
+      return true;
+    }
+
+    await this.browser.snapshot(pg, 'profile-unreachable');
+    return false;
   }
 
   private async gotoSearch(pg: Page, keyword: string): Promise<void> {

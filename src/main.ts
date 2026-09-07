@@ -18,7 +18,7 @@ async function bootstrap() {
   app.enableCors();
 
   const config = app.get(ConfigService);
-  const port = config.get<number>('PORT', 3340);
+  const port = config.get<number>('port', 3340);
   await app.listen(port, '0.0.0.0');
   console.log(`scrape-by-node listening on http://0.0.0.0:${port}`);
 }
