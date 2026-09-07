@@ -503,9 +503,24 @@ export class PlaywrightDbdClient {
 
   /** Open a company profile; falls back to direct URL when search stays on the results page. */
   private async gotoProfile(pg: Page, registrationNo: string): Promise<boolean> {
-    await this.gotoSearch(pg, registrationNo);
+    const { infosStatus, infosEmpty } = await this.gotoSearch(pg, registrationNo);
+    if (infosStatus === 404 || infosEmpty) {
+      this.logger.log(
+        `gotoProfile("${registrationNo}") -> infos API ${infosStatus === 404 ? '404' : '200 empty'} (not found)`,
+      );
+      return false;
+    }
+
     if (this.isProfileUrl(pg.url())) {
+      if (await this.isProfileNotFound(pg, registrationNo)) {
+        return false;
+      }
       return true;
+    }
+
+    if (await this.searchHasNoMatch(pg, registrationNo)) {
+      this.logger.log(`gotoProfile("${registrationNo}") -> search returned 0 results (not found)`);
+      return false;
     }
 
     const profileUrl = this.buildProfileUrl(registrationNo);
@@ -525,6 +540,9 @@ export class PlaywrightDbdClient {
 
     await this.waitForProfileReady(pg);
     if (this.isProfileUrl(pg.url())) {
+      if (await this.isProfileNotFound(pg, registrationNo)) {
+        return false;
+      }
       this.logger.log(`gotoProfile("${registrationNo}") -> url=${pg.url()}`);
       return true;
     }
@@ -533,15 +551,35 @@ export class PlaywrightDbdClient {
     return false;
   }
 
-  private async gotoSearch(pg: Page, keyword: string): Promise<void> {
+  private async gotoSearch(
+    pg: Page,
+    keyword: string,
+  ): Promise<{ infosStatus: number | null; infosEmpty: boolean }> {
     const url = `${this.browser.base}/juristic/searchInfo?keyword=${encodeURIComponent(keyword)}`;
 
-    let infosStatus: number | null = null;
-    pg.on('response', r => {
-      if (r.url().includes('/api/v1/company-profiles/infos')) infosStatus = r.status();
-    });
+    const infosResponsePromise = pg
+      .waitForResponse(r => r.url().includes('/api/v1/company-profiles/infos'), {
+        timeout: this.browser.navigationTimeout,
+      })
+      .catch(() => null);
 
     await pg.goto(url, { waitUntil: 'domcontentloaded' });
+
+    let infosStatus: number | null = null;
+    let infosEmpty = false;
+    const infosResponse = await infosResponsePromise;
+    if (infosResponse) {
+      infosStatus = infosResponse.status();
+      if (infosResponse.ok()) {
+        try {
+          const body = (await infosResponse.json()) as { contents?: unknown[] };
+          infosEmpty = !body.contents?.length;
+        } catch {
+          // response body unavailable or not JSON
+        }
+      }
+    }
+
     await this.browser.dismissPopup(pg);
 
     const blocked = await this.browser.detectBlock(pg);
@@ -559,12 +597,23 @@ export class PlaywrightDbdClient {
     ]).catch(() => undefined);
     await pg.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
     this.logger.log(
-      `gotoSearch("${keyword}") -> url=${pg.url()} | search-XHR status=${infosStatus ?? 'NOT CALLED'}`,
+      `gotoSearch("${keyword}") -> url=${pg.url()} | search-XHR status=${infosStatus ?? 'NOT CALLED'} empty=${infosEmpty}`,
     );
+    return { infosStatus, infosEmpty };
   }
 
   private isProfileUrl(url: string): boolean {
     return /\/company\/profile\//.test(url);
+  }
+
+  /** True when the search results page has no row matching `registrationNo`. */
+  private async searchHasNoMatch(pg: Page, registrationNo: string): Promise<boolean> {
+    const scraped = await this.parseResultsTable(pg);
+    if (scraped.totalCount === 0 || !scraped.rows.length) {
+      return true;
+    }
+    const id = registrationNo.replace(/\D/g, '');
+    return !scraped.rows.some(row => (row[2] ?? '').replace(/\D/g, '') === id);
   }
 
   private async goToPage(pg: Page, page: number): Promise<void> {
@@ -665,9 +714,51 @@ export class PlaywrightDbdClient {
     await pg.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
   }
 
+  private isBenignPageError(e: unknown): boolean {
+    const msg = e instanceof Error ? e.message : String(e);
+    return /Target page.*closed|Execution context was destroyed|page\.evaluate.*closed/i.test(msg);
+  }
+
+  private async isProfileNotFound(pg: Page, _registrationNo: string): Promise<boolean> {
+    if (pg.isClosed()) return true;
+
+    try {
+      return await pg.evaluate(() => {
+        const text = document.body?.innerText || '';
+        return /ไม่พบ|ไม่พบข้อมูล|not found/i.test(text);
+      });
+    } catch (e) {
+      if (this.isBenignPageError(e)) return true;
+      throw e;
+    }
+  }
+
   private async parseProfile(pg: Page): Promise<DbdCompanyProfile | null> {
-    await this.waitForProfileReady(pg);
-    const raw = await pg.evaluate(() => {
+    if (pg.isClosed()) return null;
+
+    let raw: {
+      regNo: string;
+      nameHeader: string;
+      juristicType: string;
+      status: string;
+      registrationDate: string;
+      registeredCapital: string;
+      paidCapital: string;
+      businessGroup: string;
+      businessSize: string;
+      businessTypeRaw: string;
+      objective: string;
+      address: string;
+      website: string;
+      financialYearsRaw: string;
+      directors: string[];
+    };
+
+    try {
+      await this.waitForProfileReady(pg);
+      if (pg.isClosed()) return null;
+
+      raw = await pg.evaluate(() => {
       const clean = (s: string | null | undefined) => (s || '').replace(/\s+/g, ' ').trim();
       const all = [...document.querySelectorAll('td,th,div,span,dt,dd,p,li,a')] as HTMLElement[];
       const valueOf = (label: string): string => {
@@ -716,7 +807,14 @@ export class PlaywrightDbdClient {
         financialYearsRaw: valueOf('ปีที่ส่งงบการเงิน'),
         directors,
       };
-    });
+      });
+    } catch (e) {
+      if (this.isBenignPageError(e)) {
+        this.logger.warn(`parseProfile failed (page gone): ${(e as Error).message}`);
+        return null;
+      }
+      throw e;
+    }
 
     if (!raw.regNo && !raw.nameHeader) return null;
 
